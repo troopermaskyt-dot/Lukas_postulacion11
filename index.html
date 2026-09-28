@@ -185,6 +185,12 @@ footer{text-align:center;color:var(--muted);padding:24px;font-size:.85rem;border
   <label for="aEmail">Correo</label><input id="aEmail" type="email" autocomplete="email">
   <label for="aPass">Contraseña</label><input id="aPass" type="password" autocomplete="current-password" minlength="6">
   <div id="aMsg" role="status"></div>
+  <div id="reBox" class="hidden">
+    <div class="acts">
+      <button class="btn ghost sm" id="aResend" type="button">Reenviar correo de verificación</button>
+      <button class="btn sm" id="aChk" type="button">Ya lo verifiqué</button>
+    </div>
+  </div>
   <div class="acts">
     <button class="btn" id="aGo" type="button">Entrar</button>
     <button class="btn ghost" id="aClose" type="button">Cancelar</button>
@@ -259,7 +265,11 @@ $("form").onsubmit = async e => {
 
 /* ---------- Login ---------- */
 const dlg = $("dlg");
-$("btnLogin").onclick = () => { $("aMsg").className = ""; $("aMsg").textContent = ""; dlg.showModal(); };
+$("btnLogin").onclick = () => {
+  $("aMsg").className = ""; $("aMsg").textContent = "";
+  $("reBox").classList.toggle("hidden", !(auth && auth.currentUser && !auth.currentUser.emailVerified));
+  dlg.showModal();
+};
 $("aClose").onclick = () => dlg.close();
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
   mode = t.dataset.t;
@@ -279,14 +289,13 @@ $("aGo").onclick = async () => {
       if (email !== ADMIN_EMAIL) throw { code: "custom/not-allowed" };
       const cred = await createUserWithEmailAndPassword(auth, email, pass);
       await sendEmailVerification(cred.user);
-      show(m, "Cuenta creada. Te enviamos un correo: verifícalo y luego inicia sesión.", "ok");
-      await signOut(auth);
+      show(m, "Cuenta creada. Te enviamos un correo de verificación. Ábrelo y luego pulsa \"Ya lo verifiqué\".", "ok");
+      $("reBox").classList.remove("hidden");
     } else {
       const cred = await signInWithEmailAndPassword(auth, email, pass);
       if (cred.user.email.toLowerCase() !== ADMIN_EMAIL) { await signOut(auth); throw { code: "custom/not-allowed" }; }
       if (!cred.user.emailVerified) {
-        await sendEmailVerification(cred.user).catch(() => {});
-        await signOut(auth);
+        $("reBox").classList.remove("hidden");
         throw { code: "custom/unverified" };
       }
       dlg.close();
@@ -294,18 +303,59 @@ $("aGo").onclick = async () => {
   } catch (err) {
     const t = {
       "custom/not-allowed": "Ese correo no tiene permiso para usar este panel.",
-      "custom/unverified": "Verifica tu correo primero. Te reenviamos el mensaje.",
+      "custom/unverified": "Tu correo aún no está verificado. Abre el enlace del correo o pulsa \"Reenviar correo de verificación\".",
       "auth/email-already-in-use": "Esa cuenta ya existe. Usa la pestaña Entrar.",
       "auth/invalid-credential": "Correo o contraseña incorrectos.",
       "auth/weak-password": "La contraseña es muy débil.",
-      "auth/too-many-requests": "Demasiados intentos. Espera un momento."
-    }[err.code] || "No se pudo completar la acción. Inténtalo de nuevo.";
+      "auth/too-many-requests": "Demasiados intentos. Espera un momento.",
+      "auth/operation-not-allowed": "Falta activar 'Correo/contraseña' en Firebase → Authentication → Método de acceso.",
+      "auth/unauthorized-domain": "Este dominio no está autorizado. Agrégalo en Firebase → Authentication → Configuración → Dominios autorizados.",
+      "auth/invalid-email": "El correo no es válido.",
+      "auth/network-request-failed": "Error de red. Revisa tu conexión y que el sitio esté publicado (no abierto como archivo)."
+    }[err.code] || ("No se pudo completar la acción (" + (err.code || err.message) + ").");
     show(m, t, "err");
   }
   $("aGo").disabled = false;
 };
 
 $("btnLogout").onclick = () => signOut(auth);
+
+let coolTimer = null;
+function cooldown(sec) {
+  const b = $("aResend"); let s = sec;
+  clearInterval(coolTimer); b.disabled = true; b.textContent = "Reenviar en " + s + " s";
+  coolTimer = setInterval(() => {
+    s--;
+    if (s <= 0) { clearInterval(coolTimer); b.disabled = false; b.textContent = "Reenviar correo de verificación"; }
+    else b.textContent = "Reenviar en " + s + " s";
+  }, 1000);
+}
+$("aResend").onclick = async () => {
+  const m = $("aMsg");
+  try {
+    let u = auth.currentUser;
+    if (!u) {
+      const email = $("aEmail").value.trim().toLowerCase(), pass = $("aPass").value;
+      if (email !== ADMIN_EMAIL) return show(m, "Escribe el correo del administrador y su contraseña.", "err");
+      u = (await signInWithEmailAndPassword(auth, email, pass)).user;
+    }
+    if (u.emailVerified) return show(m, "Tu correo ya está verificado. Pulsa \"Entrar\".", "ok");
+    await sendEmailVerification(u);
+    show(m, "Correo enviado a " + u.email + ". Revisa también Spam y Promociones.", "ok");
+    cooldown(60);
+  } catch (err) {
+    show(m, err.code === "auth/too-many-requests" ? "Demasiados intentos. Espera unos 10 minutos e inténtalo de nuevo." : "No se pudo reenviar (" + (err.code || err.message) + ").", "err");
+  }
+};
+$("aChk").onclick = async () => {
+  const m = $("aMsg"), u = auth.currentUser;
+  if (!u) return show(m, "Escribe tu correo y contraseña y pulsa \"Entrar\".", "err");
+  try {
+    await u.reload(); await u.getIdToken(true);
+    if (u.emailVerified) { dlg.close(); location.reload(); }
+    else show(m, "Todavía no aparece verificado. Abre el enlace del correo y vuelve a pulsar este botón.", "err");
+  } catch (err) { show(m, "No se pudo comprobar (" + (err.code || err.message) + ").", "err"); }
+};
 $("btnPanel").onclick = () => setView(true);
 $("home").onclick = e => { e.preventDefault(); setView(false); };
 
